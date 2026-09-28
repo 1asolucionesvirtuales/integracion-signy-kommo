@@ -17,7 +17,6 @@ const ADVISORS_MAP = {
   13193555: 'Daniela.Martinez',
   15556864: 'carolina.sanchez',
   15276199: 'jehosua.luna',
-  // Por defecto si no coincide
   'default': 'jehosua.luna'
 };
 
@@ -40,7 +39,6 @@ const VALID_ORIGINS = [
  * Función principal Serverless (Vercel Handler)
  */
 module.exports = async (req, res) => {
-  // Configuración de CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -63,21 +61,23 @@ module.exports = async (req, res) => {
   }
 
   try {
-    console.log('Incoming Webhook received:', JSON.stringify(req.body));
+    console.log('Incoming Webhook Body:', req.body);
 
-    // 1. Extraer el ID del lead desde el cuerpo del webhook de Kommo
+    // 1. Extraer IDs de leads desde cualquier formato que envíe Kommo
     const leadIds = extractLeadIds(req.body);
 
     if (!leadIds || leadIds.length === 0) {
-      return res.status(400).json({
-        status: 'error',
-        message: 'No se encontró ningún ID de lead en la solicitud recibida.'
+      console.warn('No se encontraron IDs en el webhook. Body recibido:', req.body);
+      return res.status(200).json({
+        status: 'ignored',
+        message: 'No se encontró ningún ID de lead en la solicitud.',
+        receivedBody: req.body
       });
     }
 
     const results = [];
 
-    // Procesar cada lead (usualmente viene uno por evento)
+    // Procesar cada lead
     for (const leadId of leadIds) {
       try {
         console.log(`Procesando Lead ID: ${leadId}`);
@@ -104,40 +104,49 @@ module.exports = async (req, res) => {
 };
 
 /**
- * Extrae los IDs de leads desde formatos JSON o Form URL-Encoded de Kommo
+ * Extrae los IDs de leads soportando Form URL-Encoded y JSON
  */
 function extractLeadIds(body) {
   if (!body) return [];
 
-  // Caso directo si se envía { lead_id: 12345 }
-  if (body.lead_id) return [body.lead_id];
-  if (body.id) return [body.id];
-
   const ids = new Set();
 
-  // Kommo suele enviar leads[status][0][id], leads[add][0][id], leads[update][0][id]
-  if (body.leads) {
-    for (const action of ['status', 'add', 'update']) {
-      if (Array.isArray(body.leads[action])) {
-        body.leads[action].forEach(item => {
-          if (item && item.id) ids.add(item.id);
-        });
-      }
+  // Caso 1: String bruto (x-www-form-urlencoded)
+  if (typeof body === 'string') {
+    const regex = /leads\[(?:status|add|update)\]\[\d+\]\[id\]=(\d+)/g;
+    let match;
+    while ((match = regex.exec(body)) !== null) {
+      ids.add(Number(match[1]));
+    }
+    const regexFallback = /\[id\]=(\d+)/g;
+    while ((match = regexFallback.exec(body)) !== null) {
+      ids.add(Number(match[1]));
     }
   }
 
-  // Búsqueda recursiva por si viene codificado de otra forma
-  if (ids.size === 0) {
-    const searchInObject = (obj) => {
-      for (const key in obj) {
-        if (key === 'id' && (typeof obj[key] === 'number' || typeof obj[key] === 'string')) {
-          ids.add(obj[key]);
-        } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-          searchInObject(obj[key]);
+  // Caso 2: Objeto (JSON o Form parseado por Vercel)
+  if (typeof body === 'object') {
+    if (body.lead_id) ids.add(Number(body.lead_id));
+    if (body.id) ids.add(Number(body.id));
+
+    // Revisar llaves planas como 'leads[status][0][id]'
+    for (const key in body) {
+      if (key.includes('[id]') || key.endsWith('.id') || key === 'id') {
+        const val = Number(body[key]);
+        if (!isNaN(val) && val > 0) ids.add(val);
+      }
+    }
+
+    // Revisar estructura anidada de Kommo
+    if (body.leads) {
+      for (const action of ['status', 'add', 'update']) {
+        if (Array.isArray(body.leads[action])) {
+          body.leads[action].forEach(item => {
+            if (item && item.id) ids.add(Number(item.id));
+          });
         }
       }
-    };
-    searchInObject(body);
+    }
   }
 
   return Array.from(ids);
@@ -147,7 +156,7 @@ function extractLeadIds(body) {
  * Procesa la sincronización de un Lead individual
  */
 async function processLead(leadId) {
-  // 1. Obtener detalles del Lead desde la API de Kommo
+  // 1. Obtener detalles del Lead desde Kommo
   const leadUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}?with=contacts`;
   const leadRes = await fetch(leadUrl, {
     headers: {
@@ -195,10 +204,10 @@ async function processLead(leadId) {
     }
   }
 
-  // Formatear teléfono (mínimo 10 dígitos)
+  // Limpiar y validar teléfono (mínimo 10 dígitos)
   let cleanPhone = (contactPhone || '').replace(/[^\d+]/g, '');
   if (cleanPhone.length < 10) {
-    cleanPhone = ''; // Si no tiene al menos 10 dígitos, Signy lo rechazará; enviamos vacío si hay correo
+    cleanPhone = '';
   }
 
   // 3. Extraer Campos Personalizados del Lead
@@ -207,29 +216,26 @@ async function processLead(leadId) {
 
   if (lead.custom_fields_values) {
     for (const cf of lead.custom_fields_values) {
-      // Desarrollo de interés (ID 2452621 o por nombre)
       if (cf.field_id === 2452621 || cf.field_name?.toLowerCase().includes('desarrollo')) {
         desarrolloInteres = cf.values?.[0]?.value || '';
       }
-      // Fuente / Origen (ID 2442681 o por nombre)
       if (cf.field_id === 2442681 || cf.field_name?.toLowerCase().includes('fuente') || cf.field_name?.toLowerCase().includes('origen')) {
         origenLead = cf.values?.[0]?.value || '';
       }
     }
   }
 
-  // Normalizar y homologar Origen contra catálogo de Signy
-  let matchedOrigin = VALID_ORIGINS.find(o => o.toLowerCase() === origenLead.toLowerCase());
+  // Homologar Origen contra catálogo de Signy
+  let matchedOrigin = VALID_ORIGINS.find(o => o.toLowerCase() === (origenLead || '').toLowerCase());
   if (!matchedOrigin) {
-    if (origenLead.toLowerCase().includes('face')) matchedOrigin = 'Facebook';
-    else if (origenLead.toLowerCase().includes('insta')) matchedOrigin = 'Instagram';
-    else if (origenLead.toLowerCase().includes('tik')) matchedOrigin = 'Tiktok';
-    else if (origenLead.toLowerCase().includes('whats')) matchedOrigin = 'Whatsapp';
-    else if (origenLead.toLowerCase().includes('web')) matchedOrigin = 'Página Web';
-    else matchedOrigin = 'Página Web'; // Fallback por defecto
+    const oLower = (origenLead || '').toLowerCase();
+    if (oLower.includes('face')) matchedOrigin = 'Facebook';
+    else if (oLower.includes('insta')) matchedOrigin = 'Instagram';
+    else if (oLower.includes('tik')) matchedOrigin = 'Tiktok';
+    else if (oLower.includes('whats')) matchedOrigin = 'Whatsapp';
+    else matchedOrigin = 'Página Web';
   }
 
-  // Si no tiene desarrollo seleccionado, fallback
   if (!desarrolloInteres) {
     desarrolloInteres = 'CONDESA';
   }
@@ -237,7 +243,7 @@ async function processLead(leadId) {
   // 4. Mapear Asesor asignado
   const asesorSigny = ADVISORS_MAP[lead.responsible_user_id] || ADVISORS_MAP['default'];
 
-  // 5. Construir Body exacto requerido por Signy API
+  // 5. Construir Body exacto para Signy API
   const signyPayload = {
     evento: 'crear',
     id_lead_kommo: String(lead.id),
