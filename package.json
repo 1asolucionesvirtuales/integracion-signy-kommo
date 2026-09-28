@@ -1,0 +1,7 @@
+{
+  "name": "integracion-signy-kommo",
+  "version": "1.0.0",
+  "description": "Middleware para sincronizar leads de Kommo con Signy Riscos",
+  "main": "api/webhook.js",
+  "dependencies": {}
+}
