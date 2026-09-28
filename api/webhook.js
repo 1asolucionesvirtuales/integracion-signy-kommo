@@ -67,7 +67,6 @@ module.exports = async (req, res) => {
   }
 
   try {
-    // 1. Extraer IDs de leads soportando Form URL-Encoded y JSON
     const leadIds = extractLeadIds(req.body);
 
     if (!leadIds || leadIds.length === 0) {
@@ -83,7 +82,6 @@ module.exports = async (req, res) => {
     // Procesar cada lead
     for (const leadId of leadIds) {
       try {
-        // Control de duplicados por ráfagas rápidas de webhooks (últimos 30 segundos)
         const now = Date.now();
         const lastProcessed = recentlyProcessed.get(leadId);
         if (lastProcessed && (now - lastProcessed) < 30000) {
@@ -182,7 +180,7 @@ async function processLead(leadId) {
 
   const lead = await leadRes.json();
 
-  // 2. Control de duplicados en Kommo: Verificar si ya tiene la etiqueta "Sincronizado Signy"
+  // 2. Control de duplicados: Verificar si ya tiene la etiqueta "Sincronizado Signy"
   const existingTags = lead._embedded?.tags || [];
   const alreadySynced = existingTags.some(t => t.name === SYNCED_TAG);
 
@@ -231,6 +229,22 @@ async function processLead(leadId) {
   let cleanPhone = (contactPhone || '').replace(/[^\d+]/g, '');
   if (cleanPhone.length < 10) {
     cleanPhone = '';
+  }
+
+  // Validación previa de datos obligatorios de contacto (al menos uno requerido)
+  if (!cleanPhone && !contactEmail) {
+    const errorNote = '⚠️ No se pudo sincronizar con Signy Riscos:\n• Motivo: El contacto no cuenta con un teléfono válido (mínimo 10 dígitos) ni correo electrónico.';
+    await addNoteToKommoLead(lead.id, errorNote);
+
+    // Crear tarea pendiente para el asesor responsable
+    const taskText = '⚠️ Completar datos para Signy: Agregar teléfono válido (mín. 10 dígitos) o correo electrónico al contacto.';
+    await createTaskInKommo(lead.id, lead.responsible_user_id, taskText);
+
+    return {
+      leadId: lead.id,
+      signyStatus: 'skipped_incomplete_contact',
+      message: 'Falta teléfono y correo'
+    };
   }
 
   // 4. Extraer Campos Personalizados del Lead
@@ -308,6 +322,10 @@ async function processLead(leadId) {
   } else {
     const errorMsg = signyData.message || signyData.info?.mensaje_operacion || 'Error desconocido';
     noteText = `⚠️ Advertencia de Sincronización Signy Riscos:\n• Motivo: ${errorMsg}`;
+
+    // Crear tarea pendiente para el asesor si Signy rechazó la información
+    const taskText = `⚠️ Revisar datos para Signy: ${errorMsg}. Por favor actualiza la información del lead.`;
+    await createTaskInKommo(lead.id, lead.responsible_user_id, taskText);
   }
 
   await addNoteToKommoLead(lead.id, noteText);
@@ -317,6 +335,36 @@ async function processLead(leadId) {
     signyStatus: signyData.status,
     response: signyData
   };
+}
+
+/**
+ * Crea una tarea automática asignada al asesor responsable en Kommo
+ */
+async function createTaskInKommo(leadId, responsibleUserId, taskText) {
+  try {
+    const tasksUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/tasks`;
+    const dueTime = Math.floor(Date.now() / 1000) + (24 * 3600); // Vence en 24 horas
+
+    await fetch(tasksUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${KOMMO_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify([
+        {
+          responsible_user_id: responsibleUserId,
+          entity_id: leadId,
+          entity_type: 'leads',
+          text: taskText,
+          complete_till: dueTime
+        }
+      ])
+    });
+    console.log(`Tarea creada exitosamente en el lead ${leadId} para el usuario ${responsibleUserId}`);
+  } catch (e) {
+    console.error('Error creando tarea en Kommo:', e);
+  }
 }
 
 /**
