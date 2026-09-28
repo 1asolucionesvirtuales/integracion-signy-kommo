@@ -11,6 +11,12 @@ const SIGNY_TOKEN = process.env.SIGNY_TOKEN || '28aeb4015e3ea66c85067d4727f9acc0
 const SIGNY_CLIENT = process.env.SIGNY_CLIENT || 'signy_riscos';
 const SIGNY_SERVICE = process.env.SIGNY_SERVICE || 'kommo_leads';
 
+// Etiqueta oficial para evitar duplicados
+const SYNCED_TAG = 'Sincronizado Signy';
+
+// Cache en memoria para descartar peticiones casi instantáneas para el mismo lead
+const recentlyProcessed = new Map();
+
 // Mapeo oficial de Asesores Kommo (ID de Usuario) -> Signy Username
 const ADVISORS_MAP = {
   13193551: 'Estrella.Cruz',
@@ -61,13 +67,10 @@ module.exports = async (req, res) => {
   }
 
   try {
-    console.log('Incoming Webhook Body:', req.body);
-
-    // 1. Extraer IDs de leads desde cualquier formato que envíe Kommo
+    // 1. Extraer IDs de leads soportando Form URL-Encoded y JSON
     const leadIds = extractLeadIds(req.body);
 
     if (!leadIds || leadIds.length === 0) {
-      console.warn('No se encontraron IDs en el webhook. Body recibido:', req.body);
       return res.status(200).json({
         status: 'ignored',
         message: 'No se encontró ningún ID de lead en la solicitud.',
@@ -80,6 +83,17 @@ module.exports = async (req, res) => {
     // Procesar cada lead
     for (const leadId of leadIds) {
       try {
+        // Control de duplicados por ráfagas rápidas de webhooks (últimos 30 segundos)
+        const now = Date.now();
+        const lastProcessed = recentlyProcessed.get(leadId);
+        if (lastProcessed && (now - lastProcessed) < 30000) {
+          console.log(`Lead ${leadId} procesado hace menos de 30s. Descartando llamada duplicada.`);
+          results.push({ leadId, status: 'ignored', reason: 'debounce_duplicate' });
+          continue;
+        }
+
+        recentlyProcessed.set(leadId, now);
+
         console.log(`Procesando Lead ID: ${leadId}`);
         const result = await processLead(leadId);
         results.push(result);
@@ -111,7 +125,6 @@ function extractLeadIds(body) {
 
   const ids = new Set();
 
-  // Caso 1: String bruto (x-www-form-urlencoded)
   if (typeof body === 'string') {
     const regex = /leads\[(?:status|add|update)\]\[\d+\]\[id\]=(\d+)/g;
     let match;
@@ -124,12 +137,10 @@ function extractLeadIds(body) {
     }
   }
 
-  // Caso 2: Objeto (JSON o Form parseado por Vercel)
   if (typeof body === 'object') {
     if (body.lead_id) ids.add(Number(body.lead_id));
     if (body.id) ids.add(Number(body.id));
 
-    // Revisar llaves planas como 'leads[status][0][id]'
     for (const key in body) {
       if (key.includes('[id]') || key.endsWith('.id') || key === 'id') {
         const val = Number(body[key]);
@@ -137,7 +148,6 @@ function extractLeadIds(body) {
       }
     }
 
-    // Revisar estructura anidada de Kommo
     if (body.leads) {
       for (const action of ['status', 'add', 'update']) {
         if (Array.isArray(body.leads[action])) {
@@ -172,7 +182,20 @@ async function processLead(leadId) {
 
   const lead = await leadRes.json();
 
-  // 2. Extraer información del contacto
+  // 2. Control de duplicados en Kommo: Verificar si ya tiene la etiqueta "Sincronizado Signy"
+  const existingTags = lead._embedded?.tags || [];
+  const alreadySynced = existingTags.some(t => t.name === SYNCED_TAG);
+
+  if (alreadySynced) {
+    console.log(`Lead ${leadId} ya tiene la etiqueta "${SYNCED_TAG}". Omitiendo para no duplicar en Signy.`);
+    return {
+      leadId,
+      status: 'ignored',
+      reason: 'already_synced_tag_present'
+    };
+  }
+
+  // 3. Extraer información del contacto
   let contactName = lead.name || 'Lead sin nombre';
   let contactPhone = '';
   let contactEmail = '';
@@ -210,7 +233,7 @@ async function processLead(leadId) {
     cleanPhone = '';
   }
 
-  // 3. Extraer Campos Personalizados del Lead
+  // 4. Extraer Campos Personalizados del Lead
   let desarrolloInteres = '';
   let origenLead = '';
 
@@ -240,10 +263,10 @@ async function processLead(leadId) {
     desarrolloInteres = 'CONDESA';
   }
 
-  // 4. Mapear Asesor asignado
+  // 5. Mapear Asesor asignado
   const asesorSigny = ADVISORS_MAP[lead.responsible_user_id] || ADVISORS_MAP['default'];
 
-  // 5. Construir Body exacto para Signy API
+  // 6. Construir Body exacto para Signy API
   const signyPayload = {
     evento: 'crear',
     id_lead_kommo: String(lead.id),
@@ -257,7 +280,7 @@ async function processLead(leadId) {
 
   console.log('Enviando a Signy API:', JSON.stringify(signyPayload));
 
-  // 6. Enviar a Signy API
+  // 7. Enviar a Signy API
   const signyRes = await fetch(SIGNY_API_URL, {
     method: 'POST',
     headers: {
@@ -273,12 +296,15 @@ async function processLead(leadId) {
   const signyData = await signyRes.json();
   console.log('Respuesta de Signy:', JSON.stringify(signyData));
 
-  // 7. Escribir Nota de vuelta en Kommo
+  // 8. Escribir Nota y agregar Etiqueta "Sincronizado Signy" en Kommo
   let noteText = '';
   if (signyData.status === 'ok') {
     const idProceso = signyData.info?.datos?.id_proceso || 'N/A';
     const idOp = signyData.info?.datos?.id_operacion || 'N/A';
     noteText = `✅ Sincronizado exitosamente con Signy Riscos.\n• ID Prospecto Signy: ${idProceso}\n• Folio Operación: ${idOp}\n• Asesor: ${asesorSigny}\n• Desarrollo: ${desarrolloInteres}`;
+
+    // Añadir la etiqueta de sincronizado para que no se vuelva a sincronizar
+    await addTagToKommoLead(lead.id, existingTags, SYNCED_TAG);
   } else {
     const errorMsg = signyData.message || signyData.info?.mensaje_operacion || 'Error desconocido';
     noteText = `⚠️ Advertencia de Sincronización Signy Riscos:\n• Motivo: ${errorMsg}`;
@@ -291,6 +317,33 @@ async function processLead(leadId) {
     signyStatus: signyData.status,
     response: signyData
   };
+}
+
+/**
+ * Agrega la etiqueta al Lead en Kommo para evitar duplicados
+ */
+async function addTagToKommoLead(leadId, existingTags, newTagName) {
+  try {
+    const updatedTags = existingTags.map(t => ({ name: t.name }));
+    updatedTags.push({ name: newTagName });
+
+    const patchUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
+    await fetch(patchUrl, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${KOMMO_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        _embedded: {
+          tags: updatedTags
+        }
+      })
+    });
+    console.log(`Etiqueta "${newTagName}" añadida exitosamente al lead ${leadId}`);
+  } catch (e) {
+    console.error('Error añadiendo etiqueta a Kommo:', e);
+  }
 }
 
 /**
