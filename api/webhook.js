@@ -180,20 +180,7 @@ async function processLead(leadId) {
 
   const lead = await leadRes.json();
 
-  // 2. Control de duplicados: Verificar si ya tiene la etiqueta "Sincronizado Signy"
-  const existingTags = lead._embedded?.tags || [];
-  const alreadySynced = existingTags.some(t => t.name === SYNCED_TAG);
-
-  if (alreadySynced) {
-    console.log(`Lead ${leadId} ya tiene la etiqueta "${SYNCED_TAG}". Omitiendo para no duplicar en Signy.`);
-    return {
-      leadId,
-      status: 'ignored',
-      reason: 'already_synced_tag_present'
-    };
-  }
-
-  // 3. Extraer información del contacto
+  // 2. Extraer información del contacto
   let contactName = lead.name || 'Lead sin nombre';
   let contactPhone = '';
   let contactEmail = '';
@@ -247,14 +234,21 @@ async function processLead(leadId) {
     };
   }
 
-  // 4. Extraer Campos Personalizados del Lead
-  let desarrolloInteres = '';
+  // 3. Extraer TODOS los desarrollos de interés seleccionados (campo multiselect 2452621) y el origen
+  const selectedDevelopments = [];
   let origenLead = '';
 
   if (lead.custom_fields_values) {
     for (const cf of lead.custom_fields_values) {
       if (cf.field_id === 2452621 || cf.field_name?.toLowerCase().includes('desarrollo')) {
-        desarrolloInteres = cf.values?.[0]?.value || '';
+        if (Array.isArray(cf.values)) {
+          cf.values.forEach(v => {
+            const val = (v.value || '').trim();
+            if (val && !selectedDevelopments.includes(val)) {
+              selectedDevelopments.push(val);
+            }
+          });
+        }
       }
       if (cf.field_id === 2442681 || cf.field_name?.toLowerCase().includes('fuente') || cf.field_name?.toLowerCase().includes('origen')) {
         origenLead = cf.values?.[0]?.value || '';
@@ -262,7 +256,38 @@ async function processLead(leadId) {
     }
   }
 
-  // Homologar Origen contra catálogo de Signy
+  if (selectedDevelopments.length === 0) {
+    selectedDevelopments.push('CONDESA');
+  }
+
+  // 4. Control inteligente de duplicados por desarrollo
+  // Verificamos qué desarrollos ya fueron sincronizados previamente mediante etiquetas (ej. "Signy: CONDESA")
+  const existingTags = lead._embedded?.tags || [];
+  const existingTagNames = existingTags.map(t => (t.name || '').toLowerCase().trim());
+  const hasLegacyTag = existingTagNames.includes(SYNCED_TAG.toLowerCase());
+
+  const pendingDevelopments = selectedDevelopments.filter((dev, idx) => {
+    const specificTag = `signy: ${dev.toLowerCase()}`;
+    const alreadyTagged = existingTagNames.includes(specificTag);
+    if (alreadyTagged) return false;
+    // Si tiene la etiqueta legacy histórica y solo tiene 1 desarrollo registrado, se asume ya sincronizado
+    if (hasLegacyTag && selectedDevelopments.length === 1 && idx === 0) return false;
+    return true;
+  });
+
+  if (pendingDevelopments.length === 0) {
+    console.log(`Lead ${leadId} ya tiene todos sus desarrollos sincronizados en Signy (${selectedDevelopments.join(', ')}). Omitiendo.`);
+    return {
+      leadId,
+      status: 'ignored',
+      reason: 'all_developments_already_synced',
+      developments: selectedDevelopments
+    };
+  }
+
+  console.log(`Lead ${leadId} tiene desarrollos pendientes por sincronizar en Signy: [${pendingDevelopments.join(', ')}]`);
+
+  // 5. Homologar Origen contra catálogo oficial de Signy
   let matchedOrigin = VALID_ORIGINS.find(o => o.toLowerCase() === (origenLead || '').toLowerCase());
   if (!matchedOrigin) {
     const oLower = (origenLead || '').toLowerCase();
@@ -273,67 +298,69 @@ async function processLead(leadId) {
     else matchedOrigin = 'Página Web';
   }
 
-  if (!desarrolloInteres) {
-    desarrolloInteres = 'CONDESA';
-  }
-
-  // 5. Mapear Asesor asignado
+  // 6. Mapear Asesor asignado
   const asesorSigny = ADVISORS_MAP[lead.responsible_user_id] || ADVISORS_MAP['default'];
 
-  // 6. Construir Body exacto para Signy API
-  const signyPayload = {
-    evento: 'crear',
-    id_lead_kommo: String(lead.id),
-    nombre: contactName,
-    telefono: cleanPhone,
-    correo: contactEmail,
-    asesor: asesorSigny,
-    origen: matchedOrigin,
-    desarrollo_interes: desarrolloInteres
-  };
+  // 7. Sincronizar CADA desarrollo pendiente como un lead individual en Signy
+  const syncResults = [];
+  const tagsToAdd = [SYNCED_TAG];
 
-  console.log('Enviando a Signy API:', JSON.stringify(signyPayload));
+  for (const dev of pendingDevelopments) {
+    console.log(`Enviando a Signy desarrollo [${dev}] para el lead Kommo ${lead.id}...`);
 
-  // 7. Enviar a Signy API
-  const signyRes = await fetch(SIGNY_API_URL, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${SIGNY_TOKEN}`,
-      'X-Client': SIGNY_CLIENT,
-      'X-Service': SIGNY_SERVICE,
-      'Content-Type': 'application/json',
-      'Accept': 'application/json'
-    },
-    body: JSON.stringify(signyPayload)
-  });
+    const signyPayload = {
+      evento: 'crear',
+      id_lead_kommo: String(lead.id),
+      nombre: contactName,
+      telefono: cleanPhone,
+      correo: contactEmail,
+      asesor: asesorSigny,
+      origen: matchedOrigin,
+      desarrollo_interes: dev
+    };
 
-  const signyData = await signyRes.json();
-  console.log('Respuesta de Signy:', JSON.stringify(signyData));
+    const signyRes = await fetch(SIGNY_API_URL, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${SIGNY_TOKEN}`,
+        'X-Client': SIGNY_CLIENT,
+        'X-Service': SIGNY_SERVICE,
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify(signyPayload)
+    });
 
-  // 8. Escribir Nota y agregar Etiqueta "Sincronizado Signy" en Kommo
-  let noteText = '';
-  if (signyData.status === 'ok') {
-    const idProceso = signyData.info?.datos?.id_proceso || 'N/A';
-    const idOp = signyData.info?.datos?.id_operacion || 'N/A';
-    noteText = `✅ Sincronizado exitosamente con Signy Riscos.\n• ID Prospecto Signy: ${idProceso}\n• Folio Operación: ${idOp}\n• Asesor: ${asesorSigny}\n• Desarrollo: ${desarrolloInteres}`;
+    const signyData = await signyRes.json();
+    console.log(`Respuesta de Signy para [${dev}]:`, JSON.stringify(signyData));
 
-    // Añadir la etiqueta de sincronizado para que no se vuelva a sincronizar
-    await addTagToKommoLead(lead.id, existingTags, SYNCED_TAG);
-  } else {
-    const errorMsg = signyData.message || signyData.info?.mensaje_operacion || 'Error desconocido';
-    noteText = `⚠️ Advertencia de Sincronización Signy Riscos:\n• Motivo: ${errorMsg}`;
+    let noteText = '';
+    if (signyData.status === 'ok') {
+      const idProceso = signyData.info?.datos?.id_proceso || 'N/A';
+      const idOp = signyData.info?.datos?.id_operacion || 'N/A';
+      noteText = `✅ Sincronizado exitosamente con Signy Riscos.\n• Desarrollo: ${dev}\n• ID Prospecto Signy: ${idProceso}\n• Folio Operación: ${idOp}\n• Asesor: ${asesorSigny}\n• Origen: ${matchedOrigin}`;
 
-    // Crear tarea pendiente para el asesor si Signy rechazó la información
-    const taskText = `⚠️ Revisar datos para Signy: ${errorMsg}. Por favor actualiza la información del lead.`;
-    await createTaskInKommo(lead.id, lead.responsible_user_id, taskText);
+      tagsToAdd.push(`Signy: ${dev}`);
+      syncResults.push({ dev, status: 'ok', idProceso, idOp });
+    } else {
+      const errorMsg = signyData.message || signyData.info?.mensaje_operacion || 'Error desconocido';
+      noteText = `⚠️ Advertencia de Sincronización Signy Riscos (${dev}):\n• Motivo: ${errorMsg}`;
+
+      const taskText = `⚠️ Revisar datos para Signy (${dev}): ${errorMsg}. Por favor actualiza la información del lead.`;
+      await createTaskInKommo(lead.id, lead.responsible_user_id, taskText);
+      syncResults.push({ dev, status: 'error', error: errorMsg });
+    }
+
+    await addNoteToKommoLead(lead.id, noteText);
   }
 
-  await addNoteToKommoLead(lead.id, noteText);
+  // 8. Guardar las etiquetas de los desarrollos sincronizados en Kommo
+  await addTagsToKommoLead(lead.id, existingTags, tagsToAdd);
 
   return {
     leadId: lead.id,
-    signyStatus: signyData.status,
-    response: signyData
+    processedDevelopments: pendingDevelopments,
+    results: syncResults
   };
 }
 
@@ -368,12 +395,18 @@ async function createTaskInKommo(leadId, responsibleUserId, taskText) {
 }
 
 /**
- * Agrega la etiqueta al Lead en Kommo para evitar duplicados
+ * Agrega etiquetas al Lead en Kommo asegurando no duplicar existentes
  */
-async function addTagToKommoLead(leadId, existingTags, newTagName) {
+async function addTagsToKommoLead(leadId, existingTags, newTagNames) {
   try {
-    const updatedTags = existingTags.map(t => ({ name: t.name }));
-    updatedTags.push({ name: newTagName });
+    const updatedTags = (existingTags || []).map(t => ({ name: t.name }));
+    const tagList = Array.isArray(newTagNames) ? newTagNames : [newTagNames];
+
+    for (const tagName of tagList) {
+      if (tagName && !updatedTags.some(t => t.name.toLowerCase() === tagName.toLowerCase())) {
+        updatedTags.push({ name: tagName });
+      }
+    }
 
     const patchUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${leadId}`;
     await fetch(patchUrl, {
@@ -388,9 +421,9 @@ async function addTagToKommoLead(leadId, existingTags, newTagName) {
         }
       })
     });
-    console.log(`Etiqueta "${newTagName}" añadida exitosamente al lead ${leadId}`);
+    console.log(`Etiquetas [${tagList.join(', ')}] añadidas exitosamente al lead ${leadId}`);
   } catch (e) {
-    console.error('Error añadiendo etiqueta a Kommo:', e);
+    console.error('Error añadiendo etiquetas a Kommo:', e);
   }
 }
 
