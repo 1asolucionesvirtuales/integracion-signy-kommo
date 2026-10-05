@@ -173,6 +173,14 @@ async function processLead(leadId) {
     }
   });
 
+  if (leadRes.status === 204) {
+    return {
+      leadId,
+      status: 'ignored',
+      reason: 'lead_not_found_204'
+    };
+  }
+
   if (!leadRes.ok) {
     const errText = await leadRes.text();
     throw new Error(`Error obteniendo lead de Kommo (${leadRes.status}): ${errText}`);
@@ -195,7 +203,7 @@ async function processLead(leadId) {
       }
     });
 
-    if (contactRes.ok) {
+    if (contactRes.ok && contactRes.status !== 204) {
       const contactData = await contactRes.json();
       if (contactData.name) contactName = contactData.name;
 
@@ -261,22 +269,67 @@ async function processLead(leadId) {
   }
 
   // 4. Control inteligente de duplicados por desarrollo
-  // Verificamos qué desarrollos ya fueron sincronizados previamente mediante etiquetas (ej. "Signy: CONDESA")
   const existingTags = lead._embedded?.tags || [];
   const existingTagNames = existingTags.map(t => (t.name || '').toLowerCase().trim());
   const hasLegacyTag = existingTagNames.includes(SYNCED_TAG.toLowerCase());
 
-  const pendingDevelopments = selectedDevelopments.filter((dev, idx) => {
-    const specificTag = `signy: ${dev.toLowerCase()}`;
-    const alreadyTagged = existingTagNames.includes(specificTag);
-    if (alreadyTagged) return false;
-    // Si tiene la etiqueta legacy histórica y solo tiene 1 desarrollo registrado, se asume ya sincronizado
-    if (hasLegacyTag && selectedDevelopments.length === 1 && idx === 0) return false;
-    return true;
-  });
+  const alreadySyncedDevs = new Set();
+  const backfilledTags = [];
+
+  // A. Revisar si ya tiene etiquetas específicas "Signy: <desarrollo>"
+  for (const tag of existingTags) {
+    const tagName = (tag.name || '').trim();
+    if (tagName.toLowerCase().startsWith('signy:')) {
+      const devName = tagName.substring(6).trim();
+      if (devName) alreadySyncedDevs.add(devName.toLowerCase());
+    }
+  }
+
+  // B. Si tiene la etiqueta legacy histórica pero no las específicas, consultar notas de Kommo
+  // para verificar qué desarrollos ya fueron enviados a Signy previamente y no duplicarlos
+  if (hasLegacyTag) {
+    try {
+      const notesUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/${lead.id}/notes`;
+      const notesRes = await fetch(notesUrl, {
+        headers: {
+          'Authorization': `Bearer ${KOMMO_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (notesRes.ok && notesRes.status !== 204) {
+        const notesData = await notesRes.json();
+        const notes = notesData._embedded?.notes || [];
+        for (const note of notes) {
+          const text = (note.params?.text || '').toLowerCase();
+          if (text.includes('sincronizado exitosamente con signy') || text.includes('id prospecto signy')) {
+            for (const dev of selectedDevelopments) {
+              if (text.includes(dev.toLowerCase())) {
+                alreadySyncedDevs.add(dev.toLowerCase());
+                backfilledTags.push(`Signy: ${dev}`);
+              }
+            }
+          }
+        }
+      }
+    } catch (notesErr) {
+      console.warn('Error verificando notas históricas:', notesErr);
+    }
+
+    // Fallback: si solo tiene 1 desarrollo registrado y tenía la etiqueta legacy
+    if (selectedDevelopments.length === 1 && alreadySyncedDevs.size === 0) {
+      alreadySyncedDevs.add(selectedDevelopments[0].toLowerCase());
+      backfilledTags.push(`Signy: ${selectedDevelopments[0]}`);
+    }
+  }
+
+  // Filtrar desarrollos que realmente están pendientes
+  const pendingDevelopments = selectedDevelopments.filter(dev => !alreadySyncedDevs.has(dev.toLowerCase()));
 
   if (pendingDevelopments.length === 0) {
     console.log(`Lead ${leadId} ya tiene todos sus desarrollos sincronizados en Signy (${selectedDevelopments.join(', ')}). Omitiendo.`);
+    if (backfilledTags.length > 0) {
+      await addTagsToKommoLead(lead.id, existingTags, backfilledTags);
+    }
     return {
       leadId,
       status: 'ignored',
@@ -303,7 +356,7 @@ async function processLead(leadId) {
 
   // 7. Sincronizar CADA desarrollo pendiente como un lead individual en Signy
   const syncResults = [];
-  const tagsToAdd = [SYNCED_TAG];
+  const tagsToAdd = [SYNCED_TAG, ...backfilledTags];
 
   for (const dev of pendingDevelopments) {
     console.log(`Enviando a Signy desarrollo [${dev}] para el lead Kommo ${lead.id}...`);
