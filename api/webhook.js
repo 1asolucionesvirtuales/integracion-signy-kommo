@@ -226,9 +226,18 @@ async function processLead(leadId) {
     cleanPhone = '';
   }
 
+  // Limpiar y validar correo electrónico (extrae formato válido y elimina caracteres como ": " o palabras previas)
+  let cleanEmail = (contactEmail || '').trim();
+  const emailMatch = cleanEmail.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/);
+  if (emailMatch) {
+    cleanEmail = emailMatch[0].toLowerCase();
+  } else {
+    cleanEmail = '';
+  }
+
   // Validación previa de datos obligatorios de contacto (al menos uno requerido)
-  if (!cleanPhone && !contactEmail) {
-    const errorNote = '⚠️ No se pudo sincronizar con Signy Riscos:\n• Motivo: El contacto no cuenta con un teléfono válido (mínimo 10 dígitos) ni correo electrónico.';
+  if (!cleanPhone && !cleanEmail) {
+    const errorNote = '⚠️ No se pudo sincronizar con Signy Riscos:\n• Motivo: El contacto no cuenta con un teléfono válido (mínimo 10 dígitos) ni correo electrónico válido.';
     await addNoteToKommoLead(lead.id, errorNote);
 
     // Crear tarea pendiente para el asesor responsable
@@ -238,7 +247,7 @@ async function processLead(leadId) {
     return {
       leadId: lead.id,
       signyStatus: 'skipped_incomplete_contact',
-      message: 'Falta teléfono y correo'
+      message: 'Falta teléfono y correo válidos'
     };
   }
 
@@ -366,7 +375,7 @@ async function processLead(leadId) {
       id_lead_kommo: String(lead.id),
       nombre: contactName,
       telefono: cleanPhone,
-      correo: contactEmail,
+      correo: cleanEmail,
       asesor: asesorSigny,
       origen: matchedOrigin,
       desarrollo_interes: dev
@@ -396,7 +405,7 @@ async function processLead(leadId) {
       tagsToAdd.push(`Signy: ${dev}`);
       syncResults.push({ dev, status: 'ok', idProceso, idOp });
     } else {
-      const errorMsg = signyData.message || signyData.info?.mensaje_operacion || 'Error desconocido';
+      const errorMsg = signyData.info?.mensaje_operacion || signyData.message || 'Error desconocido';
       noteText = `⚠️ Advertencia de Sincronización Signy Riscos (${dev}):\n• Motivo: ${errorMsg}`;
 
       const taskText = `⚠️ Revisar datos para Signy (${dev}): ${errorMsg}. Por favor actualiza la información del lead.`;
