@@ -41,6 +41,25 @@ const VALID_ORIGINS = [
   'WhatsApp Bot'
 ];
 
+// Catálogo oficial y normalización de Desarrollos de Interés en Signy Riscos
+const DEVELOPMENTS_MAP = {
+  'condesa': 'CONDESA',
+  'condesa ii': 'CONDESA II',
+  'condesa iii': 'CONDESA III',
+  'alpes': 'ALPES',
+  'alpes ii': 'ALPES II',
+  'adagio i': 'ADAGIO I',
+  'allegro iii': 'ALLEGRO III',
+  'intercity i': 'INTERCITY I',
+  'intercity ii': 'INTERCITY II',
+  'mirador': 'MIRADOR',
+  'mirador ii': 'MIRADOR II',
+  'grand cumbre mirador': 'GRAND CUMBRE MIRADOR',
+  'vista alta': 'VISTA ALTA',
+  'lantana': 'LANTANA',
+  'casas riscos': 'CASAS RISCOS'
+};
+
 /**
  * Función principal Serverless (Vercel Handler)
  */
@@ -260,9 +279,12 @@ async function processLead(leadId) {
       if (cf.field_id === 2452621 || cf.field_name?.toLowerCase().includes('desarrollo')) {
         if (Array.isArray(cf.values)) {
           cf.values.forEach(v => {
-            const val = (v.value || '').trim();
-            if (val && !selectedDevelopments.includes(val)) {
-              selectedDevelopments.push(val);
+            const rawVal = (v.value || '').trim();
+            if (rawVal) {
+              const normalized = DEVELOPMENTS_MAP[rawVal.toLowerCase()] || rawVal.toUpperCase();
+              if (!selectedDevelopments.includes(normalized)) {
+                selectedDevelopments.push(normalized);
+              }
             }
           });
         }
@@ -400,10 +422,22 @@ async function processLead(leadId) {
     if (signyData.status === 'ok') {
       const idProceso = signyData.info?.datos?.id_proceso || 'N/A';
       const idOp = signyData.info?.datos?.id_operacion || 'N/A';
+      const alertas = signyData.info?.datos?.alertas || {};
+
+      const alertList = [];
+      if (alertas.desarrollo_interes) alertList.push(`Desarrollo: ${alertas.desarrollo_interes}`);
+      if (alertas.asesor) alertList.push(`Asesor: ${alertas.asesor}`);
+      if (alertas.origen) alertList.push(`Origen: ${alertas.origen}`);
+      if (alertas.nombre_cliente) alertList.push(`Nombre: ${alertas.nombre_cliente}`);
+
       noteText = `✅ Sincronizado exitosamente con Signy Riscos.\n• Desarrollo: ${dev}\n• ID Prospecto Signy: ${idProceso}\n• Folio Operación: ${idOp}\n• Asesor: ${asesorSigny}\n• Origen: ${matchedOrigin}`;
 
+      if (alertList.length > 0) {
+        noteText += `\n⚠️ Alertas de Signy:\n${alertList.map(a => `• ${a}`).join('\n')}`;
+      }
+
       tagsToAdd.push(`Signy: ${dev}`);
-      syncResults.push({ dev, status: 'ok', idProceso, idOp });
+      syncResults.push({ dev, status: 'ok', idProceso, idOp, alertas: alertList });
     } else {
       const errorMsg = signyData.info?.mensaje_operacion || signyData.message || 'Error desconocido';
       noteText = `⚠️ Advertencia de Sincronización Signy Riscos (${dev}):\n• Motivo: ${errorMsg}`;
