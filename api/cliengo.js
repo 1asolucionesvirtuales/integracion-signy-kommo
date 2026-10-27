@@ -12,6 +12,9 @@ const PIPELINE_ID = 13749307;
 const STATUS_CONTACTO_INICIAL = 106080223;
 const STATUS_VENTA_PERDIDA = 143;
 
+// Interruptor de Pausa: Permite congelar la recepción de leads hacia Kommo hasta la fecha de entrega
+const IS_PAUSED = process.env.CLIENGO_PAUSED === 'true';
+
 // Equipo oficial de Asesoras de Venta para asignación Round-Robin
 const SALES_ADVISORS = [
   13193551, // Estrella Cruz
@@ -91,6 +94,15 @@ module.exports = async (req, res) => {
       return res.status(200).json({
         status: 'ok',
         message: 'Conexión probada exitosamente con el Webhook de Cliengo.'
+      });
+    }
+
+    // Modo Pausa: Si la integración está en pausa comercial previa a la entrega
+    if (IS_PAUSED) {
+      console.log('Integración Cliengo en modo PAUSA. Petición recibida y respondida con 200 OK (sin alterar Kommo).');
+      return res.status(200).json({
+        status: 'paused',
+        message: 'La integración se encuentra en pausa temporal previa a entrega formal.'
       });
     }
 
