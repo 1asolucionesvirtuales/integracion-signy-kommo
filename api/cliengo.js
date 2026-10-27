@@ -13,7 +13,7 @@ const STATUS_CONTACTO_INICIAL = 106080223;
 const STATUS_VENTA_PERDIDA = 143;
 
 // Interruptor de Pausa: Permite congelar la recepción de leads hacia Kommo hasta la fecha de entrega
-const IS_PAUSED = process.env.CLIENGO_PAUSED === 'true';
+const IS_PAUSED = true; // PAUSADO hasta la entrega formal dentro de 3 días
 
 // Equipo oficial de Asesoras de Venta para asignación Round-Robin
 const SALES_ADVISORS = [
