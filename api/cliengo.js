@@ -23,6 +23,25 @@ const WEBSITES_MAP = {
   '6ab5559c0e8d1d779edaeecc': 'GRAND CUMBRE MIRADOR'
 };
 
+// Catálogo oficial de enums en Kommo CRM para el campo Desarrollo de Interés (2452621)
+const KOMMO_DEVELOPMENTS = {
+  'CONDESA': { enum_id: 1850179, value: 'CONDESA' },
+  'CONDESA II': { enum_id: 1850181, value: 'CONDESA II' },
+  'CONDESA III': { enum_id: 1850183, value: 'CONDESA III' },
+  'ALPES': { enum_id: 1850185, value: 'ALPES' },
+  'ALPES II': { enum_id: 1850187, value: 'ALPES II' },
+  'ADAGIO I': { enum_id: 1850189, value: 'ADAGIO I' },
+  'ALLEGRO III': { enum_id: 1850191, value: 'ALLEGRO III' },
+  'INTERCITY I': { enum_id: 1850193, value: 'INTERCITY I' },
+  'INTERCITY II': { enum_id: 1850195, value: 'INTERCITY II' },
+  'MIRADOR': { enum_id: 1850197, value: 'MIRADOR' },
+  'MIRADOR II': { enum_id: 1850199, value: 'MIRADOR II' },
+  'GRAND CUMBRE MIRADOR': { enum_id: 1850201, value: 'GRAND CUMBRE MIRADOR' },
+  'VISTA ALTA': { enum_id: 1857335, value: 'VISTA ALTA' },
+  'LANTANA': { enum_id: 1858809, value: 'Lantana' },
+  'CASAS RISCOS': { enum_id: 1864217, value: 'CASAS RISCOS' }
+};
+
 // Cache de debounce para evitar duplicados en ráfaga (mismo contacto procesado en < 30s)
 const recentlyProcessed = new Map();
 
@@ -188,11 +207,12 @@ async function processCliengoLead(contact) {
   ];
 
   // 5. Preparar Campos personalizados del Lead
+  const devMeta = KOMMO_DEVELOPMENTS[devInteres] || { value: devInteres };
   const customFields = [
     {
       field_id: 2452621, // Desarrollo de Interés (multiselect)
       values: [
-        { value: devInteres }
+        devMeta.enum_id ? { enum_id: devMeta.enum_id } : { value: devMeta.value }
       ]
     },
     {
