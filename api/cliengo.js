@@ -13,7 +13,9 @@ const STATUS_CONTACTO_INICIAL = 106080223;
 const STATUS_VENTA_PERDIDA = 143;
 
 // Interruptor de Pausa: Permite congelar la recepción de leads hacia Kommo hasta la fecha de entrega
-const IS_PAUSED = true; // PAUSADO hasta la entrega formal dentro de 3 días
+const IS_PAUSED = process.env.CLIENGO_PAUSED !== undefined 
+  ? process.env.CLIENGO_PAUSED === 'true' 
+  : true; // Por defecto pausado hasta entrega formal
 
 // Equipo oficial de Asesoras de Venta para asignación Round-Robin
 const SALES_ADVISORS = [
@@ -97,15 +99,6 @@ module.exports = async (req, res) => {
       });
     }
 
-    // Modo Pausa: Si la integración está en pausa comercial previa a la entrega
-    if (IS_PAUSED) {
-      console.log('Integración Cliengo en modo PAUSA. Petición recibida y respondida con 200 OK (sin alterar Kommo).');
-      return res.status(200).json({
-        status: 'paused',
-        message: 'La integración se encuentra en pausa temporal previa a entrega formal.'
-      });
-    }
-
     // Extraer y normalizar datos del contacto de Cliengo
     const contactData = extractContactFromCliengo(body);
 
@@ -114,6 +107,30 @@ module.exports = async (req, res) => {
         status: 'ignored',
         message: 'No se encontraron datos mínimos de contacto en el payload.',
         receivedBody: body
+      });
+    }
+
+    // EXCLUSIÓN LANTANA: Los prospectos de Plaza Lantana (plazalantana.mx) no se sincronizan con Kommo CRM por requerimiento del cliente
+    const siteUrl = (contactData.websiteUrl || '').toLowerCase();
+    const isLantana = contactData.websiteId === '6aa1caffb8521d798e61ab6a' ||
+                      siteUrl.includes('lantana') ||
+                      (contactData.message && contactData.message.toLowerCase().includes('lantana'));
+
+    if (isLantana) {
+      console.log(`Prospecto excluido: ${contactData.name} (${contactData.phone || contactData.email}) consultó por LANTANA (plazalantana.mx). Omitiendo sincronización con Kommo CRM según solicitud del cliente.`);
+      return res.status(200).json({
+        status: 'ignored',
+        reason: 'excluded_project_lantana',
+        message: 'Los prospectos del proyecto Lantana (plazalantana.mx) están excluidos de sincronización con Kommo CRM por requerimiento del cliente.'
+      });
+    }
+
+    // Modo Pausa: Si la integración está en pausa comercial previa a la entrega
+    if (IS_PAUSED) {
+      console.log('Integración Cliengo en modo PAUSA. Petición recibida y respondida con 200 OK (sin alterar Kommo).');
+      return res.status(200).json({
+        status: 'paused',
+        message: 'La integración se encuentra en pausa temporal previa a entrega formal.'
       });
     }
 
@@ -345,6 +362,19 @@ async function processCliengoLead(contact) {
   // 1. Determinar el Desarrollo Inmobiliario
   let devInteres = WEBSITES_MAP[contact.websiteId] || '';
 
+  // Detección por URL del sitio web (ej. plazalantana.mx)
+  const siteUrl = (contact.websiteUrl || '').toLowerCase();
+  if (!devInteres) {
+    if (siteUrl.includes('lantana')) devInteres = 'LANTANA';
+    else if (siteUrl.includes('vistaalta') || siteUrl.includes('vista alta')) devInteres = 'VISTA ALTA';
+    else if (siteUrl.includes('condesa')) devInteres = 'CONDESA';
+    else if (siteUrl.includes('alpes')) devInteres = 'ALPES';
+    else if (siteUrl.includes('intercity')) devInteres = 'INTERCITY I';
+    else if (siteUrl.includes('mirador')) devInteres = 'MIRADOR';
+    else if (siteUrl.includes('cumbre')) devInteres = 'GRAND CUMBRE MIRADOR';
+  }
+
+  // Detección por texto del mensaje
   if (!devInteres && contact.message) {
     const msgLower = contact.message.toLowerCase();
     if (msgLower.includes('lantana')) devInteres = 'LANTANA';
@@ -354,6 +384,22 @@ async function processCliengoLead(contact) {
     else if (msgLower.includes('intercity')) devInteres = 'INTERCITY I';
     else if (msgLower.includes('mirador')) devInteres = 'MIRADOR';
     else if (msgLower.includes('cumbre')) devInteres = 'GRAND CUMBRE MIRADOR';
+  }
+
+  // EXCLUSIÓN LANTANA: Los prospectos de Plaza Lantana (plazalantana.mx) no se sincronizan con Kommo CRM por requerimiento del cliente
+  const isLantana = devInteres === 'LANTANA' ||
+                    contact.websiteId === '6aa1caffb8521d798e61ab6a' ||
+                    siteUrl.includes('lantana') ||
+                    (contact.message && contact.message.toLowerCase().includes('lantana'));
+
+  if (isLantana) {
+    console.log(`Prospecto excluido: ${contact.name} (${contact.phone || contact.email}) consultó por LANTANA (plazalantana.mx). Omitiendo sincronización con Kommo CRM según solicitud del cliente.`);
+    return {
+      action: 'skipped_excluded_project',
+      development: 'LANTANA',
+      name: contact.name,
+      reason: 'El cliente solicitó expresamente excluir prospectos del proyecto Lantana (plazalantana.mx) de la sincronización con Kommo CRM.'
+    };
   }
 
   if (!devInteres) {
