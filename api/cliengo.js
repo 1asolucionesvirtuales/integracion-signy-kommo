@@ -199,10 +199,9 @@ async function processCliengoLead(contact) {
     contactId = await createContactInKommo(contact);
   }
 
-  // 4. Preparar Etiquetas: "Cliengo-<Proyecto>", "NO Bots" y "Página Web"
+  // 4. Preparar Etiquetas: "Cliengo-<Proyecto>" y "Página Web"
   const tags = [
     { name: `Cliengo-${devInteres}` },
-    { name: 'NO Bots' },
     { name: 'Página Web' }
   ];
 
