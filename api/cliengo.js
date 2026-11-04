@@ -100,10 +100,19 @@ module.exports = async (req, res) => {
     // Extraer y normalizar datos del contacto de Cliengo
     const contactData = extractContactFromCliengo(body);
 
-    if (!contactData || (!contactData.name && !contactData.phone && !contactData.email)) {
+    // REGLA ESTRICTA DE CALIDAD: Para ingresar a Kommo CRM DEBE contar con al menos un medio de contacto directo
+    // (teléfono válido de mínimo 10 dígitos o correo electrónico válido).
+    // Eventos de chat iniciados pero abandonados sin contacto, o sesiones anónimas, se descartan para evitar prospectos vacíos.
+    const digitsOnly = (contactData?.phone || '').replace(/[^\d]/g, '');
+    const hasValidPhone = digitsOnly.length >= 10;
+    const hasValidEmail = Boolean(contactData?.email);
+
+    if (!contactData || (!hasValidPhone && !hasValidEmail)) {
+      console.log(`Prospecto ignorado: No cuenta con teléfono ni email válidos. (Nombre: '${contactData?.name || 'Vacío'}', Tel: '${contactData?.phone || ''}', Email: '${contactData?.email || ''}')`);
       return res.status(200).json({
         status: 'ignored',
-        message: 'No se encontraron datos mínimos de contacto en el payload.',
+        reason: 'missing_contact_info',
+        message: 'No se encontraron datos mínimos de contacto válidos (teléfono de al menos 10 dígitos o correo electrónico) en el payload.',
         receivedBody: body
       });
     }
@@ -210,7 +219,7 @@ function extractContactFromCliengo(body) {
   const id = data.id || body.contactId || body.id || '';
   const name = (data.name || body.name || '').trim();
   const lastName = (data.lastName || body.lastName || '').trim();
-  const fullName = [name, lastName].filter(Boolean).join(' ') || name || 'Lead Cliengo';
+  const rawName = [name, lastName].filter(Boolean).join(' ') || name || '';
 
   const rawPhone = data.phone || data.internationalPhoneNumber || data.whatsappPhoneNumber || body.phone || '';
   const cleanPhone = formatMexicanPhone(rawPhone);
@@ -222,6 +231,9 @@ function extractContactFromCliengo(body) {
     cleanEmail = emailMatch[0].toLowerCase();
   }
 
+  // Si no se proporcionó nombre, pero sí dejó teléfono o correo, usar un nombre descriptivo (nunca "Lead Cliengo" a secas)
+  const fullName = rawName || (cleanPhone ? `Prospecto ${cleanPhone}` : (cleanEmail ? `Prospecto ${cleanEmail}` : ''));
+
   // Transcripción o mensaje del chat
   const chatMessage = data.message || body.message || data.chatLog || '';
 
@@ -232,6 +244,7 @@ function extractContactFromCliengo(body) {
   return {
     id,
     name: fullName,
+    rawName,
     phone: cleanPhone,
     email: cleanEmail,
     message: chatMessage,
