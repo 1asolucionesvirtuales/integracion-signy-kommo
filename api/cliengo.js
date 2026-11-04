@@ -12,10 +12,8 @@ const PIPELINE_ID = 13749307;
 const STATUS_CONTACTO_INICIAL = 106080223;
 const STATUS_VENTA_PERDIDA = 143;
 
-// Interruptor de Pausa: Permite congelar la recepción de leads hacia Kommo hasta la fecha de entrega
-const IS_PAUSED = process.env.CLIENGO_PAUSED !== undefined 
-  ? process.env.CLIENGO_PAUSED === 'true' 
-  : true; // Por defecto pausado hasta entrega formal
+// Interruptor de Pausa: Integración 100% activa en producción para Casas Riscos
+const IS_PAUSED = process.env.CLIENGO_PAUSED === 'true'; // Activo por defecto. Solo se pausa si CLIENGO_PAUSED='true' en Vercel
 
 // Equipo oficial de Asesoras de Venta para asignación Round-Robin
 const SALES_ADVISORS = [
