@@ -7,27 +7,17 @@ const KOMMO_SUBDOMAIN = process.env.KOMMO_SUBDOMAIN || 'casasriscos';
 const KOMMO_TOKEN = process.env.KOMMO_TOKEN || 'eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiIsImp0aSI6IjljNTllYTQwYzVhNWQ1OTFjNTU1NjM0NWNmZDkzY2QzOTg4NTM0ZjYyNWI3NWEzMmMyMTkxN2NlNTU3NzY1MjFlNzdlYmNjMzg3MGEzNzZmIn0.eyJhdWQiOiIwNzMyNzIxMi1jOTBjLTQxMTgtYTk4Yi0wMmZmMWI3YmUzODQiLCJqdGkiOiI5YzU5ZWE0MGM1YTVkNTkxYzU1NTYzNDVjZmQ5M2NkMzk4ODUzNGY2MjViNzVhMzJjMjE5MTdjZTU1Nzc2NTIxZTc3ZWJjYzM4NzBhMzc2ZiIsImlhdCI6MTc5MDYxODU2NiwibmJmIjoxNzkwNjE4NTY2LCJleHAiOjE5MjQ5MDU2MDAsInN1YiI6IjczMDYxNjkiLCJncmFudF90eXBlIjoiIiwiYWNjb3VudF9pZCI6MzY0ODM5NjMsImJhc2VfZG9tYWluIjoia29tbW8uY29tIiwidmVyc2lvbiI6Miwic2NvcGVzIjpbImNybSIsImZpbGVzIiwiZmlsZXNfZGVsZXRlIiwibGlzdF9leHRlcm5hbF9tZXNzYWdlcyIsIm5vdGlmaWNhdGlvbnMiLCJwdXNoX25vdGlmaWNhdGlvbnMiLCJzZW5kX2V4dGVybmFsX21lc3NhZ2VzIiwidXNlcnNfYWN0aXZhdGUiLCJ1c2Vyc19hZGQiLCJ1c2Vyc19kZWFjdGl2YXRlIl0sImhhc2hfdXVpZCI6IjZkNThiNmI2LWQ5NmQtNDQwYy1iODIzLWY4NWVjMDM4ZDA3ZSIsImFwaV9kb21haW4iOiJhcGktZy5rb21tby5jb20ifQ.PhDQRJxM7x41nHyXC8kSAytjfErWROMfTjSMLqYjawudAm9huM6g59gL6OWbA1lmWUvFjxiWwZQ5KiLoKdtBj64JFxKJYPSFTQa_a_AGVWwjS8ih5oYh-PVN2wTsPiIgvhaTnTfAoy2U7F1J8MqAKXKUMf_h-C2tQeyKzMR6YuQbBvTSXdYSXnv3S5-b0IoPg0sycg5I3qTawqiHkveN1_jM4Woe4YsV0C96PK8tmy_rUDJOo5iunvYzh-LWfPTP2ZvmdWHPRV4OavOgfaBz20DM9hZpL-GVLF3fmjkuhla3bFKnuQYfvLr48SSDpEBOcoCbk-8ACPQwlHeuNh3Q7g';
 const CLIENGO_API_KEY = process.env.CLIENGO_API_KEY || 'df73b0e5-8b20-40e1-8f60-f102b9f332a3';
 
-// Pipeline y Etapa en Kommo: "Secuencia de Venta" -> "Contacto inicial"
+// Pipeline y Etapa en Kommo: "Secuencia de Venta"
 const PIPELINE_ID = 13749307;
-const STATUS_CONTACTO_INICIAL = 106080223;
+const STATUS_LEADS_ENTRANTES = 106080219; // Leads Entrantes (Unsorted) para distribución dinámica del cliente
+const STATUS_CONTACTO_INICIAL = 106080223; // Contacto inicial para reactivaciones
 const STATUS_VENTA_PERDIDA = 143;
 
 // Interruptor de Pausa: Integración 100% activa en producción para Casas Riscos
 const IS_PAUSED = process.env.CLIENGO_PAUSED === 'true'; // Activo por defecto. Solo se pausa si CLIENGO_PAUSED='true' en Vercel
 
-// Equipo oficial de Asesoras de Venta para asignación Round-Robin
-const SALES_ADVISORS = [
-  13193551, // Estrella Cruz
-  13193555, // Daniela Martinez
-  15556864  // Carolina Sánchez
-];
-
-let roundRobinIndex = 0;
-function getNextSalesAdvisor() {
-  const advisorId = SALES_ADVISORS[roundRobinIndex % SALES_ADVISORS.length];
-  roundRobinIndex = (roundRobinIndex + 1) % SALES_ADVISORS.length;
-  return advisorId;
-}
+// Asesora de respaldo si un lead en reactivación estaba asignado al usuario técnico de soporte (7306169)
+const FALLBACK_ADVISOR = 13193551; // Estrella Cruz
 
 // Mapeo oficial de Sitios Web de Cliengo a Desarrollos de Casas Riscos
 const WEBSITES_MAP = {
@@ -324,22 +314,21 @@ function mergeDevelopment(existingCustomFields = [], devInteres) {
  */
 async function createTaskInKommo(leadId, responsibleUserId, taskText) {
   try {
-    const assignedUser = (responsibleUserId && responsibleUserId !== 7306169 && responsibleUserId !== 0)
-      ? responsibleUserId
-      : getNextSalesAdvisor();
-
     // Vencimiento a las 24 horas siguientes (timestamp en segundos)
     const completeTill = Math.floor(Date.now() / 1000) + 86400;
 
-    const payload = [
-      {
-        responsible_user_id: assignedUser,
-        entity_id: leadId,
-        entity_type: 'leads',
-        text: taskText,
-        complete_till: completeTill
-      }
-    ];
+    const taskObj = {
+      entity_id: leadId,
+      entity_type: 'leads',
+      text: taskText,
+      complete_till: completeTill
+    };
+
+    if (responsibleUserId && responsibleUserId !== 7306169 && responsibleUserId !== 0) {
+      taskObj.responsible_user_id = responsibleUserId;
+    }
+
+    const payload = [taskObj];
 
     const res = await fetch(`https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/tasks`, {
       method: 'POST',
@@ -358,7 +347,7 @@ async function createTaskInKommo(leadId, responsibleUserId, taskText) {
 
     const data = await res.json();
     const taskId = data._embedded?.tasks?.[0]?.id;
-    console.log(`Tarea creada exitosamente en Kommo (ID: ${taskId}) asignada al asesor ${assignedUser}`);
+    console.log(`Tarea creada exitosamente en Kommo (ID: ${taskId}) para lead ${leadId}`);
     return taskId;
   } catch (err) {
     console.error('Error creando tarea en Kommo:', err);
@@ -438,11 +427,6 @@ async function processCliengoLead(contact) {
     }
   }
 
-  // Si no existía, crear contacto nuevo con teléfono formateado (+52...)
-  if (!contactId) {
-    contactId = await createContactInKommo(contact);
-  }
-
   const tagsToAdd = [`Cliengo-${devInteres}`, 'Página Web'];
 
   // 3. Revisar si el contacto ya tiene Leads asociados
@@ -482,18 +466,18 @@ async function processCliengoLead(contact) {
 
   // -------------------------------------------------------------
   // CASO 1: Lead Existente en VENTA PERDIDA (Status 143)
-  // Regla: Reactivar a "Contacto inicial" en Secuencia de Venta, conservar su mismo asesor.
+  // Regla: Reactivar a "Contacto inicial" en Secuencia de Venta, conservar su misma asesora.
   // -------------------------------------------------------------
   if (targetLead && isLostLead) {
-    console.log(`Lead existente ${targetLead.id} está en VENTA PERDIDA. Reactivando a Contacto Inicial...`);
+    console.log(`Lead existente ${targetLead.id} está en VENTA PERDIDA. Reactivando a Contacto Inicial conservando asesora...`);
 
     const mergedTags = mergeTags(targetLead._embedded?.tags || [], tagsToAdd);
     const updatedCustomFields = mergeDevelopment(targetLead.custom_fields_values || [], devInteres);
 
-    // Si el lead no tenía asesor válido o estaba a nombre de Cristina (7306169), rotarlo
+    // Conservar la misma asesora que tenía asignada el lead
     let assignedAdvisor = targetLead.responsible_user_id;
     if (!assignedAdvisor || assignedAdvisor === 7306169 || assignedAdvisor === 0) {
-      assignedAdvisor = getNextSalesAdvisor();
+      assignedAdvisor = FALLBACK_ADVISOR; // Asesora real de respaldo si no tenía asesor o estaba en soporte
     }
 
     const patchPayload = {
@@ -514,7 +498,7 @@ async function processCliengoLead(contact) {
       await addNoteToKommo(targetLead.id, formattedTranscript);
     }
 
-    // Crear tarea para el asesor asignado
+    // Crear tarea para la asesora asignada
     const taskText = `💬 Recontacto Cliengo (${devInteres}): El cliente (estaba en Perdido) volvió a escribir por el bot web. Revisa el chat en notas y contáctalo.`;
     await createTaskInKommo(targetLead.id, assignedAdvisor, taskText);
 
@@ -531,17 +515,17 @@ async function processCliengoLead(contact) {
 
   // -------------------------------------------------------------
   // CASO 2: Lead Existente en OTRA ETAPA ACTIVA
-  // Regla: Dejarlo donde esté (no alterar status ni pipeline).
+  // Regla: Dejarlo donde esté con su misma asesora (no alterar status ni pipeline).
   // -------------------------------------------------------------
   if (targetLead && !isLostLead) {
-    console.log(`Lead existente ${targetLead.id} está activo en etapa ${targetLead.status_id}. Manteniendo su etapa actual.`);
+    console.log(`Lead existente ${targetLead.id} está activo en etapa ${targetLead.status_id}. Manteniendo su etapa y asesora actual.`);
 
     const mergedTags = mergeTags(targetLead._embedded?.tags || [], tagsToAdd);
     const updatedCustomFields = mergeDevelopment(targetLead.custom_fields_values || [], devInteres);
 
     let assignedAdvisor = targetLead.responsible_user_id;
     if (!assignedAdvisor || assignedAdvisor === 7306169 || assignedAdvisor === 0) {
-      assignedAdvisor = getNextSalesAdvisor();
+      assignedAdvisor = FALLBACK_ADVISOR;
     }
 
     const patchPayload = {
@@ -560,7 +544,7 @@ async function processCliengoLead(contact) {
       await addNoteToKommo(targetLead.id, formattedTranscript);
     }
 
-    // Crear tarea para el asesor asignado
+    // Crear tarea para la asesora asignada
     const taskText = `💬 Nueva conversación Cliengo (${devInteres}): El cliente interactuó con el bot web. Revisa el chat en notas para dar seguimiento.`;
     await createTaskInKommo(targetLead.id, assignedAdvisor, taskText);
 
@@ -575,67 +559,128 @@ async function processCliengoLead(contact) {
   }
 
   // -------------------------------------------------------------
-  // CASO 3: Lead Nuevo (Contacto nuevo o sin leads)
-  // Regla: Asignación Round-Robin directa entre asesoras de ventas para garantizar
-  // que NUNCA quede a nombre del usuario de soporte/API (Cristina).
+  // CASO 3: Lead Nuevo (Contacto nuevo o sin leads existentes)
+  // Regla: Se crea en "Leads Entrantes" (Unsorted) sin forzar asesor,
+  // para que Kommo aplique la distribución dinámica interna configurada por el cliente.
   // -------------------------------------------------------------
-  console.log(`Creando nuevo lead para ${contact.name} asignado mediante Round-Robin...`);
+  console.log(`Creando prospecto nuevo en Leads Entrantes para ${contact.name} (distribución dinámica en Kommo)...`);
+  return await createUnsortedLeadInKommo(contact, devInteres, contactId);
+}
 
-  const assignedAdvisor = getNextSalesAdvisor();
-  const leadTitle = `Cliengo - ${contact.name} (${devInteres})`;
+/**
+ * Crea un nuevo Lead en "Leads Entrantes" (Unsorted) mediante formulario
+ * para que Kommo aplique la distribución dinámica configurada por Casas Riscos.
+ */
+async function createUnsortedLeadInKommo(contact, devInteres, existingContactId = null) {
   const devMeta = KOMMO_DEVELOPMENTS[devInteres] || { value: devInteres };
+  const leadTitle = `Cliengo - ${contact.name} (${devInteres})`;
 
-  const customFields = [
-    {
-      field_id: 2452621, // Desarrollo de Interés (multiselect)
-      values: [
-        devMeta.enum_id ? { enum_id: devMeta.enum_id } : { value: devMeta.value }
-      ]
-    },
-    {
-      field_id: 2442681, // Fuente / Origen
-      values: [
-        { value: 'Chatbot' }
-      ]
-    }
-  ];
+  const contactCustomFields = [];
+  if (contact.phone) {
+    contactCustomFields.push({
+      field_code: 'PHONE',
+      values: [{ value: contact.phone, enum_code: 'MOB' }]
+    });
+  }
+  if (contact.email) {
+    contactCustomFields.push({
+      field_code: 'EMAIL',
+      values: [{ value: contact.email, enum_code: 'WORK' }]
+    });
+  }
 
-  const leadPayload = [
+  const embeddedContacts = existingContactId
+    ? [{ id: existingContactId }]
+    : [
+        {
+          name: contact.name,
+          custom_fields_values: contactCustomFields
+        }
+      ];
+
+  const unsortedPayload = [
     {
-      name: leadTitle,
+      source_name: 'Cliengo Chatbot',
+      source_uid: `cliengo_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       pipeline_id: PIPELINE_ID,
-      status_id: STATUS_CONTACTO_INICIAL,
-      responsible_user_id: assignedAdvisor,
-      custom_fields_values: customFields,
       _embedded: {
-        tags: [
-          { name: `Cliengo-${devInteres}` },
-          { name: 'Página Web' }
+        leads: [
+          {
+            name: leadTitle,
+            custom_fields_values: [
+              {
+                field_id: 2452621, // Desarrollo de Interés (multiselect)
+                values: [devMeta.enum_id ? { enum_id: devMeta.enum_id } : { value: devMeta.value }]
+              },
+              {
+                field_id: 2442681, // Fuente / Origen
+                values: [{ value: 'Chatbot' }]
+              }
+            ]
+          }
         ],
-        contacts: contactId ? [{ id: contactId }] : []
+        contacts: embeddedContacts
+      },
+      metadata: {
+        form_id: 'cliengo_chat',
+        form_name: `Chatbot Web (${devInteres})`,
+        form_page: contact.websiteUrl || 'https://casasriscos.com',
+        form_sent_at: Math.floor(Date.now() / 1000),
+        ip: '189.200.1.1',
+        referer: contact.websiteUrl || 'https://casasriscos.com'
       }
     }
   ];
 
-  const createLeadUrl = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads`;
-  const leadRes = await fetch(createLeadUrl, {
+  const url = `https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads/unsorted/forms`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${KOMMO_TOKEN}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(leadPayload)
+    body: JSON.stringify(unsortedPayload)
   });
 
-  const leadData = await leadRes.json();
-  const createdLead = leadData._embedded?.leads?.[0];
-  const newLeadId = createdLead?.id;
-
-  if (!newLeadId) {
-    throw new Error(`No se pudo crear el lead en Kommo: ${JSON.stringify(leadData)}`);
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Error creando lead en Leads Entrantes (${res.status}): ${errText}`);
   }
 
-  console.log(`Lead nuevo creado exitosamente en Kommo (ID: ${newLeadId}) asignado a asesora ${assignedAdvisor}`);
+  const data = await res.json();
+  const unsortedItem = data._embedded?.unsorted?.[0];
+  const newLeadId = unsortedItem?._embedded?.leads?.[0]?.id;
+  const newContactId = unsortedItem?._embedded?.contacts?.[0]?.id || existingContactId;
+
+  if (!newLeadId) {
+    throw new Error(`No se pudo obtener el ID del lead creado en Leads Entrantes: ${JSON.stringify(data)}`);
+  }
+
+  console.log(`Lead creado exitosamente en Leads Entrantes (ID: ${newLeadId}) para distribución dinámica en Kommo.`);
+
+  // Asignar tags al nuevo lead (en unsorted se agregan vía PATCH)
+  try {
+    await fetch(`https://${KOMMO_SUBDOMAIN}.kommo.com/api/v4/leads`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${KOMMO_TOKEN}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify([
+        {
+          id: newLeadId,
+          _embedded: {
+            tags: [
+              { name: `Cliengo-${devInteres}` },
+              { name: 'Página Web' }
+            ]
+          }
+        }
+      ])
+    });
+  } catch (tagErr) {
+    console.warn('Error agregando tags al lead en unsorted:', tagErr);
+  }
 
   // Insertar transcripción de chat como nota interna
   if (contact.message) {
@@ -643,17 +688,16 @@ async function processCliengoLead(contact) {
     await addNoteToKommo(newLeadId, formattedTranscript);
   }
 
-  // Crear tarea de contacto inmediato para la asesora asignada
+  // Crear tarea de seguimiento (sin forzar asesor para que Kommo lo asigne dinámicamente)
   const taskText = `💬 Nuevo lead Cliengo (${devInteres}): Prospecto recibido por el bot web. Revisa el chat en notas y contáctalo.`;
-  await createTaskInKommo(newLeadId, assignedAdvisor, taskText);
+  await createTaskInKommo(newLeadId, null, taskText);
 
   return {
-    action: 'created_new_lead',
+    action: 'created_new_lead_in_incoming',
     leadId: newLeadId,
-    contactId: contactId,
-    responsibleUserId: assignedAdvisor,
+    contactId: newContactId,
     development: devInteres,
-    status: STATUS_CONTACTO_INICIAL
+    stage: 'Leads Entrantes (Incoming leads)'
   };
 }
 
